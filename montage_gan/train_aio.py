@@ -118,8 +118,9 @@ def setup_training_loop_kwargs(
                                                xflip=False,
                                                conv_base_index=config["conv_base_index"]
                                                )
-    args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
-    # args.data_loader_kwargs = dnnlib.EasyDict()
+    # TODO tweaks for AIO
+    # args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
+    args.data_loader_kwargs = dnnlib.EasyDict()
     try:
         training_set = dnnlib.util.construct_class_by_name(
             **args.training_set_kwargs)  # subclass of training.dataset.Dataset
@@ -185,7 +186,9 @@ def setup_training_loop_kwargs(
         # gamma is 10 by default from the original R1 GAN paper
         # fmaps, lrate values taken from the auto
         # map was set to 2 for previous experiment, considering increase this if possible
-        'aio': dict(ref_gpus=12, kimg=25000, mb=36, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
+        # 'aio': dict(ref_gpus=8, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
+        #             map=8),
+        'aio': dict(ref_gpus=16, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
                     map=8),
     }
 
@@ -227,8 +230,8 @@ def setup_training_loop_kwargs(
         spec.fmaps * 32768)
     # TODO tweaks for AIO
     # Half the channels to conserve GPU memory
-    args.local_G_kwargs.channel_max = args.local_D_kwargs.channel_max = args.global_D_kwargs.channel_max = 256
-    # args.local_G_kwargs.channel_max = args.local_D_kwargs.channel_max = args.global_D_kwargs.channel_max = 512
+    # args.local_G_kwargs.channel_max = args.local_D_kwargs.channel_max = args.global_D_kwargs.channel_max = 256
+    args.local_G_kwargs.channel_max = args.local_D_kwargs.channel_max = args.global_D_kwargs.channel_max = 512
     args.mapping_kwargs.num_layers = spec.map
     args.local_G_kwargs.num_fp16_res = args.local_D_kwargs.num_fp16_res = args.global_D_kwargs.num_fp16_res = 4  # enable mixed-precision training
     args.local_G_kwargs.conv_clamp = args.local_D_kwargs.conv_clamp = args.global_D_kwargs.conv_clamp = 256  # clamp activations to avoid float16 overflow

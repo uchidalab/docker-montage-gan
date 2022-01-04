@@ -183,11 +183,11 @@ class MontageGANLoss:
                  local_G_list: List[torch.nn.Module],
                  augment_pipe_list: List[Optional[torch.nn.Module]],
                  local_D_list: List[torch.nn.Module],
-                 pos_estimator: torch.nn.Module,
-                 renderer: Optional[torch.nn.Module],
-                 criterion_renderer: Optional[torch.nn.Module],
-                 global_augment_pipe: Optional[torch.nn.Module],
-                 global_D: torch.nn.Module,
+                 pos_estimator: Optional[torch.nn.Module] = None,
+                 renderer: Optional[torch.nn.Module] = None,
+                 criterion_renderer: Optional[torch.nn.Module] = None,
+                 global_augment_pipe: Optional[torch.nn.Module] = None,
+                 global_D: Optional[torch.nn.Module] = None,
                  global_r1_gamma=10,
                  **sg2loss_kwargs):
         """
@@ -242,7 +242,6 @@ class MontageGANLoss:
         return logits
 
     def accumulate_gradients(self, phase, real_blchw, real_list_of_bchw, gen_z, sync, gain, real_c=None, gen_c=None):
-        # print(phase)
         do_local = phase.startswith("local_")
         do_global = phase.startswith("global_")
         do_Renderer = phase == "Renderer"
@@ -279,6 +278,7 @@ class MontageGANLoss:
                     loss_theta_constrain = theta_constrain_loss(theta)
                     training_stats.report(f'global/Loss/STN/theta_constrain', loss_theta_constrain)
                 with torch.autograd.profiler.record_function(f'Gmain_backward_global'):
+                    # loss_Gmain.mean().mul(gain).backward()
                     loss_Gmain.mean().mul(gain).backward(retain_graph=True)
                     loss_theta_constrain.mul(gain).backward()
 

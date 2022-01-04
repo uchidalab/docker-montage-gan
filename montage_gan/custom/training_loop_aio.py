@@ -47,11 +47,26 @@ renderer_config = {
     "loss_type": "mse",  # l1/mse
     # "loss_type": "l1",  # l1/mse
     # "renderer_pth_path": None,  # pth to resume from
-    "renderer_pth_path": "diff_rendering/211120-1956-output-tanh/renderer032000.pth.tar",  # pth to resume from
+    "renderer_pth_path": "pretrained/diff_rendering/211120-1956-output-tanh/renderer032000.pth.tar",
     "renderer_type": "tanh",  # sigmoid/tanh/subpixel
     # "renderer_type": "subpixel",  # sigmoid/tanh/subpixel
-    "bypass_renderer": False
+    "bypass_renderer": False,
 }
+
+# TODO tweaks for AIO
+config = {
+    "train_global": False,
+    "train_renderer": True,
+    "debug": False
+}
+
+if not config["train_global"]:
+    print("Global GAN training is disabled!!!")
+    config["train_renderer"] = False
+    renderer_config["bypass_renderer"] = True
+
+if not config["train_renderer"]:
+    print("Renderer training is disabled!!!")
 
 if not renderer_config["bypass_renderer"]:
     is_range_tanh = True  # whether the data range is [0,1] or [-1,1]
@@ -176,6 +191,7 @@ def training_loop(
     device = torch.device("cuda", rank)
     np.random.seed(random_seed * num_gpus + rank)
     torch.manual_seed(random_seed * num_gpus + rank)
+    # TODO tweaks for AIO
     cudnn_benchmark = False  # Enabled by default in SG2ada, disabled for stability
     torch.backends.cudnn.benchmark = cudnn_benchmark  # Improves training speed.
     allow_tf32 = False  # Disabled by default in SG2ada
@@ -233,14 +249,19 @@ def training_loop(
         "img_channels": num_channels,
         "img_layers": num_layers,
     }
-    pos_estimator: STN = init_module(
-        dnnlib.util.construct_class_by_name(**pos_estimator_kwargs, **stn_kwargs))
-    global_G_ema["pos_estimator"] = copy.deepcopy(pos_estimator).eval()
-    global_kwargs = {"img_resolution": res,
-                     "img_channels": num_channels,
-                     "init_res": init_res,
-                     }
-    global_D: Discriminator = init_module(dnnlib.util.construct_class_by_name(**global_D_kwargs, **global_kwargs))
+
+    if config["train_global"]:
+        pos_estimator: STN = init_module(
+            dnnlib.util.construct_class_by_name(**pos_estimator_kwargs, **stn_kwargs))
+        global_G_ema["pos_estimator"] = copy.deepcopy(pos_estimator).eval()
+        global_kwargs = {"img_resolution": res,
+                         "img_channels": num_channels,
+                         "init_res": init_res,
+                         }
+        global_D: Discriminator = init_module(dnnlib.util.construct_class_by_name(**global_D_kwargs, **global_kwargs))
+    else:
+        pos_estimator = None
+        global_D = None
 
     def copy_params_and_buffers(modules_src: Union[torch.nn.Module, List[torch.nn.Module]],
                                 modules_dst: Union[torch.nn.Module, List[torch.nn.Module]]):
@@ -262,13 +283,14 @@ def training_loop(
         modules = [("mapping_network", mapping_network)]
         modules += [("local_G_list", local_G_list)]
         modules += [("local_D_list", local_D_list)]
-        modules += [("pos_estimator", pos_estimator)]
         if not renderer_config["bypass_renderer"]:
             modules += [("renderer", renderer)]
-        modules += [("global_D", global_D)]
         modules += [("mapping_network_ema", global_G_ema["mapping_network"])]
         modules += [("local_G_ema", global_G_ema["local_G_list"])]
-        modules += [("pos_estimator_ema", global_G_ema["pos_estimator"])]
+        if config["train_global"]:
+            modules += [("pos_estimator", pos_estimator)]
+            modules += [("pos_estimator_ema", global_G_ema["pos_estimator"])]
+            modules += [("global_D", global_D)]
         for name, module in modules:
             copy_params_and_buffers(resume_data[name], module)
 
@@ -289,11 +311,12 @@ def training_loop(
     # Global augment pipeline.
     global_augment_pipe = None
     global_ada_stats = None
-    if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
-        global_augment_pipe = init_module(dnnlib.util.construct_class_by_name(**augment_kwargs))
-        global_augment_pipe.p.copy_(torch.as_tensor(augment_p))
-        if ada_target is not None:
-            global_ada_stats = training_stats.Collector(regex=f'global/Loss/signs/real')
+    if config["train_global"]:
+        if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
+            global_augment_pipe = init_module(dnnlib.util.construct_class_by_name(**augment_kwargs))
+            global_augment_pipe.p.copy_(torch.as_tensor(augment_p))
+            if ada_target is not None:
+                global_ada_stats = training_stats.Collector(regex=f'global/Loss/signs/real')
 
     # Distribute across GPUs.
     ddp_modules = dict()
@@ -303,12 +326,13 @@ def training_loop(
     modules += [("pos_estimator", pos_estimator)]
     if not renderer_config["bypass_renderer"]:
         modules += [("renderer", renderer)]
-    modules += [("global_D", global_D)]
     modules += [(None, global_G_ema["mapping_network"])]
     modules += [(None, global_G_ema["local_G_list"])]
-    modules += [(None, global_G_ema["pos_estimator"])]
     modules += [("augment_pipe_list", augment_pipe_list)]
-    modules += [("global_augment_pipe", global_augment_pipe)]
+    if config["train_global"]:
+        modules += [(None, global_G_ema["pos_estimator"])]
+        modules += [("global_D", global_D)]
+        modules += [("global_augment_pipe", global_augment_pipe)]
 
     def distribute_across_gpus(modules: Union[torch.nn.Module, List[torch.nn.Module]]):
         is_list = isinstance(modules, list)
@@ -345,7 +369,8 @@ def training_loop(
                                                    **ddp_modules,
                                                    **loss_kwargs)  # subclass of training.loss.Loss
         # Append renderer update as the first phase
-        phases += [dnnlib.EasyDict(name="Renderer", module=renderer, opt=optimizer_renderer, interval=1)]
+        if config["train_renderer"]:
+            phases += [dnnlib.EasyDict(name="Renderer", module=renderer, opt=optimizer_renderer, interval=1)]
 
     # Local GANs update phases
     for layer_name, local_G, local_D in zip(layer_names, local_G_list, local_D_list):
@@ -375,29 +400,31 @@ def training_loop(
                     dnnlib.EasyDict(name=name + f'reg_{layer_name}', module=local_module, opt=opt,
                                     interval=local_reg_interval)]
 
-    # Global GAN update after local GANs' phase
-    for name, global_module, global_opt_kwargs, global_reg_interval in [
-        ('global_G', [mapping_network, *local_G_list, pos_estimator], global_G_opt_kwargs, G_reg_interval),
-        ('global_D', global_D, global_D_opt_kwargs, D_reg_interval)]:
+    if config["train_global"]:
+        # Global GAN update after local GANs' phase
+        for name, global_module, global_opt_kwargs, global_reg_interval in [
+            ('global_G', [mapping_network, *local_G_list, pos_estimator], global_G_opt_kwargs, G_reg_interval),
+            ('global_D', global_D, global_D_opt_kwargs, D_reg_interval)]:
 
-        if name == "global_G":
-            global_parameters = chain(*[m.parameters() for m in global_module])
-        else:
-            global_parameters = global_module.parameters()
+            if name == "global_G":
+                global_parameters = chain(*[m.parameters() for m in global_module])
+            else:
+                global_parameters = global_module.parameters()
 
-        if global_reg_interval is None:
-            opt = dnnlib.util.construct_class_by_name(params=global_parameters,
-                                                      **global_opt_kwargs)  # subclass of torch.optim.Optimizer
-            phases += [dnnlib.EasyDict(name=name + 'both', module=global_module, opt=opt, interval=1)]
-        else:  # Lazy regularization.
-            mb_ratio = global_reg_interval / (global_reg_interval + 1)
-            opt_kwargs = dnnlib.EasyDict(global_opt_kwargs)
-            opt_kwargs.lr = opt_kwargs.lr * mb_ratio
-            opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
-            opt = dnnlib.util.construct_class_by_name(global_parameters,
-                                                      **opt_kwargs)  # subclass of torch.optim.Optimizer
-            phases += [dnnlib.EasyDict(name=name + 'main', module=global_module, opt=opt, interval=1)]
-            phases += [dnnlib.EasyDict(name=name + 'reg', module=global_module, opt=opt, interval=global_reg_interval)]
+            if global_reg_interval is None:
+                opt = dnnlib.util.construct_class_by_name(params=global_parameters,
+                                                          **global_opt_kwargs)  # subclass of torch.optim.Optimizer
+                phases += [dnnlib.EasyDict(name=name + 'both', module=global_module, opt=opt, interval=1)]
+            else:  # Lazy regularization.
+                mb_ratio = global_reg_interval / (global_reg_interval + 1)
+                opt_kwargs = dnnlib.EasyDict(global_opt_kwargs)
+                opt_kwargs.lr = opt_kwargs.lr * mb_ratio
+                opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
+                opt = dnnlib.util.construct_class_by_name(global_parameters,
+                                                          **opt_kwargs)  # subclass of torch.optim.Optimizer
+                phases += [dnnlib.EasyDict(name=name + 'main', module=global_module, opt=opt, interval=1)]
+                phases += [
+                    dnnlib.EasyDict(name=name + 'reg', module=global_module, opt=opt, interval=global_reg_interval)]
 
     for phase in phases:
         phase.start_event = None
@@ -470,7 +497,7 @@ def training_loop(
         with torch.autograd.profiler.record_function('data_fetch'):
             phase_real_blchw = next(training_set_iterator)  # B,L,C,H,W
             phase_real_list_of_bchw = [
-                make_batch_for_local_d(blchw.to(device), layer_size_list=layer_sizes,
+                make_batch_for_local_d(blchw, layer_size_list=layer_sizes,
                                        to_minus11=True) for blchw in phase_real_blchw.split(batch_gpu)]
             phase_real_blchw = normalize_minus11(phase_real_blchw.to(device)).split(batch_gpu)
             all_gen_z = torch.randn([len(phases) * batch_size, mapping_network.z_dim], device=device)
@@ -478,6 +505,8 @@ def training_loop(
 
         # Execute training phases.
         for phase, phase_gen_z in zip(phases, all_gen_z):
+            if config["debug"]:
+                print(phase.name)
             if batch_idx % phase.interval != 0:
                 continue
 
@@ -490,6 +519,11 @@ def training_loop(
             # Accumulate gradients over multiple rounds.
             for round_idx, (real_layer, gen_z, real_list_of_bchw) in enumerate(
                     zip(phase_real_blchw, phase_gen_z, phase_real_list_of_bchw)):
+                if phase.name.startswith("local_"):
+                    real_list_of_bchw = copy.deepcopy(real_list_of_bchw)
+                    real_list_of_bchw = [bchw.to(device) for bchw in real_list_of_bchw]
+                else:
+                    real_list_of_bchw = []
                 sync = (round_idx == batch_size // (batch_gpu * num_gpus) - 1)
                 gain = phase.interval
                 loss.accumulate_gradients(phase=phase.name, real_blchw=real_layer,
@@ -532,7 +566,8 @@ def training_loop(
             ema_beta = 0.5 ** (batch_size / max(ema_nimg, 1e-8))
             update_ema(global_G_ema["mapping_network"], mapping_network, ema_beta)
             update_ema(global_G_ema["local_G_list"], local_G_list, ema_beta)
-            update_ema(global_G_ema["pos_estimator"], pos_estimator, ema_beta)
+            if config["train_global"]:
+                update_ema(global_G_ema["pos_estimator"], pos_estimator, ema_beta)
 
         # Update state.
         cur_nimg += batch_size
@@ -587,13 +622,16 @@ def training_loop(
         def generate_sample_ema(z):
             mapping_network_ema = global_G_ema["mapping_network"]
             local_G_list_ema = global_G_ema["local_G_list"]
-            pos_estimator_ema = global_G_ema["pos_estimator"]
+            if config["train_global"]:
+                pos_estimator_ema = global_G_ema["pos_estimator"]
 
             ws = mapping_network_ema(z=z, c=torch.empty(size=(len(z), 0)))
 
             local_G_output_list = [G_ema(ws=ws[:, :G_ema.num_ws], noise_mode='const') for G_ema in local_G_list_ema]
 
             fake_layer = make_batch_for_pos_estimator(local_G_output_list, pad_value=-1)  # B,L,C,H,W [-1,1]
+            if not config["train_global"]:
+                return fake_layer
             transformed_fake_layer, _ = pos_estimator_ema(fake_layer)  # B,L,C,H,W [-1,1]
             return transformed_fake_layer
 
@@ -635,12 +673,13 @@ def training_loop(
             modules += [("pos_estimator", pos_estimator)]
             if not renderer_config["bypass_renderer"]:
                 modules += [("renderer", renderer)]
-            modules += [("global_D", global_D)]
             modules += [("mapping_network_ema", global_G_ema["mapping_network"])]
             modules += [("local_G_ema", global_G_ema["local_G_list"])]
-            modules += [("pos_estimator_ema", global_G_ema["pos_estimator"])]
             modules += [("augment_pipe_list", augment_pipe_list)]
-            modules += [("global_augment_pipe", global_augment_pipe)]
+            if config["train_global"]:
+                modules += [("pos_estimator_ema", global_G_ema["pos_estimator"])]
+                modules += [("global_augment_pipe", global_augment_pipe)]
+                modules += [("global_D", global_D)]
 
             for name, module in modules:
                 module = get_module_for_snapshot(module)
