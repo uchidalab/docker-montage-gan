@@ -186,8 +186,8 @@ def setup_training_loop_kwargs(
         # gamma is 10 by default from the original R1 GAN paper
         # fmaps, lrate values taken from the auto
         # map was set to 2 for previous experiment, considering increase this if possible
-        # 'aio': dict(ref_gpus=8, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
-        #             map=8),
+        'aio_local': dict(ref_gpus=8, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
+                          map=8),
         'aio': dict(ref_gpus=16, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
                     map=8),
     }
@@ -481,7 +481,8 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--mirror', help='Enable dataset x-flips [default: false]', type=bool, metavar='BOOL')
 # Base config.
 @click.option('--cfg', help='Base config [default: auto]',
-              type=click.Choice(['auto', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar', 'e2e', 'aio']))
+              type=click.Choice(
+                  ['auto', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar', 'e2e', 'aio', 'aio_local']))
 @click.option('--gamma', help='Override R1 gamma', type=float)
 @click.option('--kimg', help='Override training duration', type=int, metavar='INT')
 @click.option('--batch', help='Override batch size', type=int, metavar='INT')
