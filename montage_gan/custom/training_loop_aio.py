@@ -192,7 +192,8 @@ def training_loop(
     np.random.seed(random_seed * num_gpus + rank)
     torch.manual_seed(random_seed * num_gpus + rank)
     # TODO tweaks for AIO
-    cudnn_benchmark = False  # Enabled by default in SG2ada, disabled for stability
+    cudnn_benchmark = True
+    # cudnn_benchmark = False  # Enabled by default in SG2ada, disabled for stability
     torch.backends.cudnn.benchmark = cudnn_benchmark  # Improves training speed.
     allow_tf32 = False  # Disabled by default in SG2ada
     torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # Allow PyTorch to internally use tf32 for matmul
@@ -495,11 +496,18 @@ def training_loop(
     while True:
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
-            phase_real_blchw = next(training_set_iterator)  # B,L,C,H,W
+            data = next(training_set_iterator)  # B,L,C,H,W
+            phase_real_blchw = normalize_minus11(data.detach().clone()).to(device).split(batch_gpu)
             phase_real_list_of_bchw = [
-                make_batch_for_local_d(blchw, layer_size_list=layer_sizes,
-                                       to_minus11=True) for blchw in phase_real_blchw.split(batch_gpu)]
-            phase_real_blchw = normalize_minus11(phase_real_blchw.to(device)).split(batch_gpu)
+                make_batch_for_local_d(blchw, layer_size_list=layer_sizes, to_minus11=True) for blchw in
+                data.split(batch_gpu)]
+            # TODO debug
+            # phase_real_blchw = next(training_set_iterator)  # B,L,C,H,W
+            # phase_real_list_of_bchw = [
+            #     make_batch_for_local_d(blchw, layer_size_list=layer_sizes,
+            #                            to_minus11=True) for blchw in phase_real_blchw.split(batch_gpu)]
+            # phase_real_blchw = normalize_minus11(phase_real_blchw.to(device)).split(batch_gpu)
+
             all_gen_z = torch.randn([len(phases) * batch_size, mapping_network.z_dim], device=device)
             all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
 
@@ -519,11 +527,11 @@ def training_loop(
             # Accumulate gradients over multiple rounds.
             for round_idx, (real_layer, gen_z, real_list_of_bchw) in enumerate(
                     zip(phase_real_blchw, phase_gen_z, phase_real_list_of_bchw)):
-                if phase.name.startswith("local_"):
-                    real_list_of_bchw = copy.deepcopy(real_list_of_bchw)
-                    real_list_of_bchw = [bchw.to(device) for bchw in real_list_of_bchw]
-                else:
-                    real_list_of_bchw = []
+                # if phase.name.startswith("local_"):
+                #     # TODO RuntimeError: CUDA error: an illegal memory access was encountered
+                #     real_list_of_bchw = [bchw.to(device) for bchw in real_list_of_bchw]
+                # else:
+                #     real_list_of_bchw = []
                 sync = (round_idx == batch_size // (batch_gpu * num_gpus) - 1)
                 gain = phase.interval
                 loss.accumulate_gradients(phase=phase.name, real_blchw=real_layer,
@@ -534,6 +542,7 @@ def training_loop(
             set_requires_grad_(phase.module, False)
             with torch.autograd.profiler.record_function(phase.name + '_opt'):
                 param_grad_nan_to_num(phase.module)
+                # TODO RuntimeError: CUDA error: an illegal memory access was encountered
                 phase.opt.step()
             if phase.end_event is not None:
                 phase.end_event.record(torch.cuda.current_stream(device))

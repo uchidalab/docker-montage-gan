@@ -1,5 +1,6 @@
 import math
 import os
+import copy
 
 import PIL.Image as Image
 import torch
@@ -253,8 +254,11 @@ def make_batch_for_local_d(blchw, layer_size_list, to_minus11=False):
     """
     assert_range_zero1(blchw)
     b, l, c, h, w = blchw.shape
-    centered_blchw = generate_pseudo_fake(blchw).contiguous()
-    lbchw = torch.transpose(centered_blchw, 0, 1)
+    # TODO debug
+    # centered_blchw = generate_pseudo_fake(blchw).contiguous()
+    # lbchw = torch.transpose(centered_blchw, 0, 1)
+    centered_blchw = generate_pseudo_fake(blchw)
+    lbchw = torch.transpose(centered_blchw, 0, 1).contiguous()
     list_of_bchw = []
     for bchw, (base_height, base_width) in zip(lbchw, layer_size_list):
         x1, y1 = (w - base_width) // 2, (h - base_height) // 2

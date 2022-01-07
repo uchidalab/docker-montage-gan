@@ -119,8 +119,8 @@ def setup_training_loop_kwargs(
                                                conv_base_index=config["conv_base_index"]
                                                )
     # TODO tweaks for AIO
-    # args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
-    args.data_loader_kwargs = dnnlib.EasyDict()
+    args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
+    # args.data_loader_kwargs = dnnlib.EasyDict()
     try:
         training_set = dnnlib.util.construct_class_by_name(
             **args.training_set_kwargs)  # subclass of training.dataset.Dataset

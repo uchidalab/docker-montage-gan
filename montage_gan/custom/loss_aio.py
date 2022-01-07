@@ -166,8 +166,7 @@ class StyleGAN2Loss(Loss):
                 (real_logits * 0 + loss_Dreal + loss_Dr1).mean().mul(gain).backward()
 
 
-def theta_constrain_loss(theta: torch.Tensor):
-    device = theta.device
+def theta_constrain_loss(theta: torch.Tensor, device):
     img_layers = theta.shape[-3]  # B,L,2,3
     # Constrain the theta parameters' range
     upper_bound = convert_translate_to_2x3(torch.tensor([[1., 1.]] * img_layers, device=device))
@@ -254,7 +253,8 @@ class MontageGANLoss:
             assert base_phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
             assert layer_name in self.layer_names
             layer_idx = self.layer_names.index(layer_name)
-            real_img = real_list_of_bchw[layer_idx]
+            # TODO debug
+            real_img = real_list_of_bchw[layer_idx].to(self.device)
             loss = self.local_GAN_loss_list[layer_idx]
             loss.accumulate_gradients(base_phase, real_img, gen_z, sync, gain, real_c, gen_c)
 
@@ -275,7 +275,8 @@ class MontageGANLoss:
                     training_stats.report(f'global/Loss/signs/fake', gen_logits.sign())
                     loss_Gmain = torch.nn.functional.softplus(-gen_logits)  # -log(sigmoid(gen_logits))
                     training_stats.report(f'global/Loss/G/loss', loss_Gmain)
-                    loss_theta_constrain = theta_constrain_loss(theta)
+                    # TODO debug
+                    loss_theta_constrain = theta_constrain_loss(theta, self.device)
                     training_stats.report(f'global/Loss/STN/theta_constrain', loss_theta_constrain)
                 with torch.autograd.profiler.record_function(f'Gmain_backward_global'):
                     # loss_Gmain.mean().mul(gain).backward()
