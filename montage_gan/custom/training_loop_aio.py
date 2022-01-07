@@ -324,13 +324,13 @@ def training_loop(
     modules = [("mapping_network", mapping_network)]
     modules += [("local_G_list", local_G_list)]
     modules += [("local_D_list", local_D_list)]
-    modules += [("pos_estimator", pos_estimator)]
     if not renderer_config["bypass_renderer"]:
         modules += [("renderer", renderer)]
     modules += [(None, global_G_ema["mapping_network"])]
     modules += [(None, global_G_ema["local_G_list"])]
     modules += [("augment_pipe_list", augment_pipe_list)]
     if config["train_global"]:
+        modules += [("pos_estimator", pos_estimator)]
         modules += [(None, global_G_ema["pos_estimator"])]
         modules += [("global_D", global_D)]
         modules += [("global_augment_pipe", global_augment_pipe)]
