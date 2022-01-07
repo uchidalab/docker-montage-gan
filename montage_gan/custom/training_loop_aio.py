@@ -3,7 +3,7 @@ import json
 import os
 import time
 from itertools import chain
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Dict
 
 import numpy as np
 import psutil
@@ -15,11 +15,10 @@ from torchvision.utils import save_image
 
 import dnnlib
 from custom.dataset_aio import DatasetAIO
-# from training.networks import MappingNetwork, SynthesisNetwork, Discriminator
 from custom.networks_aio import MappingNetwork, SynthesisNetwork, Discriminator
-from fukuwarai.networks import STNv2c as STN
 from custom_utils.image_utils import alpha_composite, make_batch_for_pos_estimator, normalize_zero1, \
     make_batch_for_local_d, normalize_minus11
+from fukuwarai.networks import STNv2c as STN
 from torch_utils import misc
 from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
@@ -276,6 +275,16 @@ def training_loop(
         else:
             misc.copy_params_and_buffers(modules_src, modules_dst, require_all=False)
 
+    def load_state_dicts(modules: Union[torch.nn.Module, List[torch.nn.Module]],
+                         state_dicts: Union[Dict, List[Dict]]):
+        is_list = isinstance(modules, list)
+
+        if is_list:
+            assert len(modules) == len(state_dicts)
+            _ = [module.load_state_dict(state_dict) for module, state_dict in zip(modules, state_dicts)]
+        else:
+            modules.load_state_dict(state_dicts)
+
     # Resume from existing pickle.
     if (resume_pkl is not None) and (rank == 0):
         print(f'Resuming from "{resume_pkl}"')
@@ -293,7 +302,9 @@ def training_loop(
             modules += [("pos_estimator_ema", global_G_ema["pos_estimator"])]
             modules += [("global_D", global_D)]
         for name, module in modules:
-            copy_params_and_buffers(resume_data[name], module)
+            load_state_dicts(module, resume_data[name])
+            # Deprecated in favor of PyTorch default load/save function
+            # copy_params_and_buffers(resume_data[name], module)
 
     # Setup augmentation.
     # Local augment pipeline.
@@ -672,7 +683,21 @@ def training_loop(
             if is_list:
                 return [process(module) for module in modules]
             else:
-                process(modules)
+                return process(modules)
+
+        def get_state_dicts(modules: Union[torch.nn.Module, List[torch.nn.Module]]):
+            is_list = isinstance(modules, list)
+
+            def process(module: torch.nn.Module):
+                if module is not None:
+                    if num_gpus > 1:
+                        misc.check_ddp_consistency(module, ignore_regex=r'.*\.w_avg')
+                    return copy.deepcopy(module.state_dict())
+
+            if is_list:
+                return [process(module) for module in modules]
+            else:
+                return process(modules)
 
         if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
             snapshot_data = dict(training_set_kwargs=dict(training_set_kwargs))
@@ -691,9 +716,11 @@ def training_loop(
                 modules += [("global_D", global_D)]
 
             for name, module in modules:
-                module = get_module_for_snapshot(module)
-                snapshot_data[name] = module
-                del module  # conserve memory
+                snapshot_data[name] = get_state_dicts(module)
+                # Deprecated in favor of PyTorch default load/save function
+                # module = get_module_for_snapshot(module)
+                # snapshot_data[name] = module
+                # del module  # conserve memory
             snapshot_pth = os.path.join(run_dir, f'network-snapshot-{cur_nimg // 1000:06d}.pth')
             if rank == 0:
                 torch.save(snapshot_data, snapshot_pth)
