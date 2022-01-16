@@ -14,7 +14,7 @@ cfg = "aio_local"
 
 env = os.environ.copy()
 # Debug
-env["CUDA_LAUNCH_BLOCKING"] = "1"
+# env["CUDA_LAUNCH_BLOCKING"] = "1"
 
 subprocess.run(
     f"python montage_gan/train_aio.py --outdir {outdir} --data {data}"
