@@ -140,7 +140,8 @@ class DatasetAIO(Dataset):
     def __init__(self,
                  path,  # Path to directory.
                  xflip=True,  # Artificially double the size of the dataset via x-flips
-                 conv_base_index=2
+                 conv_base_index=2,
+                 **kwargs
                  ):
         self.name = dataset_config["name"]
         self.conv_base_index = conv_base_index

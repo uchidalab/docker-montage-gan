@@ -21,12 +21,6 @@ class UserError(Exception):
 
 # ----------------------------------------------------------------------------
 
-# TODO tweaks for AIO
-# control the number of convolution layer of GANs
-config = {
-    "conv_base_index": 3
-}
-
 
 def setup_training_loop_kwargs(
         # General options (not included in desc).
@@ -115,12 +109,9 @@ def setup_training_loop_kwargs(
     assert isinstance(data, str)
     args.training_set_kwargs = dnnlib.EasyDict(class_name='custom.dataset_aio.DatasetAIO',
                                                path=data,
-                                               xflip=False,
-                                               conv_base_index=config["conv_base_index"]
+                                               xflip=False
                                                )
-    # TODO tweaks for AIO
     args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
-    # args.data_loader_kwargs = dnnlib.EasyDict()
     try:
         training_set = dnnlib.util.construct_class_by_name(
             **args.training_set_kwargs)  # subclass of training.dataset.Dataset
@@ -182,14 +173,13 @@ def setup_training_loop_kwargs(
                           map=8),
         'cifar': dict(ref_gpus=2, kimg=100000, mb=64, mbstd=32, fmaps=1, lrate=0.0025, gamma=0.01, ema=500, ramp=0.05,
                       map=2),
-        # TODO tweaks for AIO
-        # gamma is 10 by default from the original R1 GAN paper
-        # fmaps, lrate values taken from the auto
-        # map was set to 2 for previous experiment, considering increase this if possible
-        'aio_local': dict(ref_gpus=8, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
-                          map=8),
-        'aio': dict(ref_gpus=16, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
+        # gamma is 10 by default from the original R1 GAN paper.
+        # fmaps, lrate values taken from the auto.
+        'aio': dict(ref_gpus=8, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
                     map=8),
+        # Use this config for GPU with smaller memory size.
+        # 'aio': dict(ref_gpus=16, kimg=25000, mb=32, mbstd=4, fmaps=0.5, lrate=0.0025, gamma=10, ema=10, ramp=None,
+        #             map=8),
     }
 
     assert cfg in cfg_specs
@@ -205,32 +195,18 @@ def setup_training_loop_kwargs(
         spec.gamma = 0.0002 * (res ** 2) / spec.mb  # heuristic formula
         spec.ema = spec.mb * 10 / 32
 
-    # args.mapping_kwargs = dnnlib.EasyDict(class_name='training.networks.MappingNetwork', z_dim=512, w_dim=512)
-    # args.local_G_kwargs = dnnlib.EasyDict(class_name='training.networks.SynthesisNetwork', w_dim=512)
-    # args.local_D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator', block_kwargs=dnnlib.EasyDict(),
-    #                                       mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
-    # args.pos_estimator_kwargs = dnnlib.EasyDict(class_name='fukuwarai.networks.STNv2c')
-    # args.global_D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator', block_kwargs=dnnlib.EasyDict(),
-    #                                        mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
-
     args.mapping_kwargs = dnnlib.EasyDict(class_name='custom.networks_aio.MappingNetwork', z_dim=512, w_dim=512)
-    args.local_G_kwargs = dnnlib.EasyDict(class_name='custom.networks_aio.SynthesisNetwork', w_dim=512,
-                                          conv_base_index=config["conv_base_index"])
+    args.local_G_kwargs = dnnlib.EasyDict(class_name='custom.networks_aio.SynthesisNetwork', w_dim=512)
     args.local_D_kwargs = dnnlib.EasyDict(class_name='custom.networks_aio.Discriminator',
                                           block_kwargs=dnnlib.EasyDict(),
-                                          mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict(),
-                                          conv_base_index=config["conv_base_index"])
+                                          mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     args.pos_estimator_kwargs = dnnlib.EasyDict(class_name='fukuwarai.networks.STNv2c')
     args.global_D_kwargs = dnnlib.EasyDict(class_name='custom.networks_aio.Discriminator',
                                            block_kwargs=dnnlib.EasyDict(),
-                                           mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict(),
-                                           conv_base_index=config["conv_base_index"])
+                                           mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
 
     args.local_G_kwargs.channel_base = args.local_D_kwargs.channel_base = args.global_D_kwargs.channel_base = int(
         spec.fmaps * 32768)
-    # TODO tweaks for AIO
-    # Half the channels to conserve GPU memory
-    # args.local_G_kwargs.channel_max = args.local_D_kwargs.channel_max = args.global_D_kwargs.channel_max = 256
     args.local_G_kwargs.channel_max = args.local_D_kwargs.channel_max = args.global_D_kwargs.channel_max = 512
     args.mapping_kwargs.num_layers = spec.map
     args.local_G_kwargs.num_fp16_res = args.local_D_kwargs.num_fp16_res = args.global_D_kwargs.num_fp16_res = 4  # enable mixed-precision training

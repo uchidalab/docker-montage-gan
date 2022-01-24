@@ -176,7 +176,7 @@ def theta_constrain_loss(theta: torch.Tensor, device):
 
 
 class MontageGANLoss:
-    def __init__(self, device,
+    def __init__(self, device, global_d_real_use_renderer, renderer_retrain_use_real,
                  mapping_network: torch.nn.Module,
                  layer_names: List[str],
                  local_G_list: List[torch.nn.Module],
@@ -202,6 +202,8 @@ class MontageGANLoss:
         :param sg2loss_kwargs: kwargs for StyleGAN2Loss
         """
         self.device = device
+        self.global_d_real_use_renderer = global_d_real_use_renderer
+        self.renderer_retrain_use_real = renderer_retrain_use_real
         assert len(local_G_list) == len(local_D_list) == len(augment_pipe_list)
 
         # Local
@@ -226,8 +228,8 @@ class MontageGANLoss:
             transformed_fake_layer, theta = self.pos_estimator(fake_layer)  # B,L,C,H,W [-1,1]
         return transformed_fake_layer, theta
 
-    def run_global_D(self, blchw, c, sync):
-        if self.renderer is not None:
+    def run_global_D(self, blchw, c, sync, use_renderer=True):
+        if self.renderer is not None and use_renderer:
             # Using renderer
             output_blended = self.renderer(blchw)  # [-1,1]
         else:
@@ -300,7 +302,8 @@ class MontageGANLoss:
                 name = 'Dreal_Dr1' if do_Dmain and do_Dr1 else 'Dreal' if do_Dmain else 'Dr1'
                 with torch.autograd.profiler.record_function(name + f'_forward_global'):
                     real_layer_tmp = real_blchw.detach().requires_grad_(do_Dr1)
-                    real_logits = self.run_global_D(real_layer_tmp, real_c, sync=sync)
+                    real_logits = self.run_global_D(real_layer_tmp, real_c, sync=sync,
+                                                    use_renderer=self.global_d_real_use_renderer)
                     training_stats.report(f'global/Loss/scores/real', real_logits)
                     training_stats.report(f'global/Loss/signs/real', real_logits.sign())
 
@@ -340,16 +343,18 @@ class MontageGANLoss:
                 training_stats.report('Renderer/psnr_gen',
                                       calc_psnr(normalize_zero1(output_renderer.detach()), target.detach()))
 
-                # Renderer with real samples
-                x = real_blchw  # B,L,C,H,W
-                output_renderer = self.renderer(x)  # [-1,1]
-                target = alpha_composite(normalize_zero1(x.detach()))  # [0,1]
-                target = target.to(self.device)
-                loss_renderer_real = self.criterion_renderer(normalize_zero1(output_renderer), target)
-                training_stats.report('Renderer/loss_real', loss_renderer_real.item())
-                training_stats.report('Renderer/psnr_real',
-                                      calc_psnr(normalize_zero1(output_renderer.detach()), target.detach()))
+                if self.renderer_retrain_use_real:
+                    # Renderer with real samples
+                    x = real_blchw  # B,L,C,H,W
+                    output_renderer = self.renderer(x)  # [-1,1]
+                    target = alpha_composite(normalize_zero1(x.detach()))  # [0,1]
+                    target = target.to(self.device)
+                    loss_renderer_real = self.criterion_renderer(normalize_zero1(output_renderer), target)
+                    training_stats.report('Renderer/loss_real', loss_renderer_real.item())
+                    training_stats.report('Renderer/psnr_real',
+                                          calc_psnr(normalize_zero1(output_renderer.detach()), target.detach()))
 
             with torch.autograd.profiler.record_function('renderer_backward'):
                 loss_renderer_gen.backward()
-                loss_renderer_real.backward()
+                if self.renderer_retrain_use_real:
+                    loss_renderer_real.backward()

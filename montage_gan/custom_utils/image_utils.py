@@ -360,6 +360,21 @@ def calc_psnr(x, y, data_range=1):
     return 10 * math.log10(data_range ** 2 / mse.item())
 
 
+def blend_white_bg(images):
+    """
+    Blend RGBA images with white background to RGB images
+    images: bchw [0,1]
+    output: bchw [0,1]
+    """
+    device = images.device
+    white_bg = torch.ones((images.shape[1:]), device=device)  # [4,H,W]
+    temp = torch.unsqueeze(images, dim=1)  # [B,1,4,H,W]
+    temp = temp.repeat(1, 2, 1, 1, 1)  # [B,2,4,H,W]
+    temp[:, 0, :, :, :] = white_bg  # Replace first layer with white bg
+    output = alpha_composite(temp)[:, :3, :, :]  # [B,3,H,W] [0,1]
+    return output
+
+
 def test():
     # t = make_dummy_batch(load_test_image().to("cuda"))
     # print(t.shape)
