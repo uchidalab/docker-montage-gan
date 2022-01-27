@@ -27,14 +27,12 @@ from training.augment import AugmentPipe
 from metrics import metric_main
 
 """
-Renderer module
+Config for renderer
+-------------------
+Pretrained models:
+1. Loss: MSE, Variant: Tanh, Path: pretrained/diff_rendering/211120-1956-output-tanh/renderer032000.pth.tar
+2. Loss: L1, Variant: Subpixel, Path: pretrained/diff_rendering/211210-1834-output-subpixel/renderer032000.pth.tar
 """
-# Note:
-# Loss: MSE, Variant: Tanh
-# diff_rendering/211120-1956-output-tanh/renderer032000.pth.tar
-
-# Loss: L1, Variant: Subpixel
-# diff_rendering/211210-1834-output-subpixel/renderer032000.pth.tar
 
 renderer_config = {
     "img_resolution": 256,
@@ -43,51 +41,52 @@ renderer_config = {
     "device": "cuda",
     "lr": 1e-3,
     "betas": (0.9, 0.999),
-    "amsgrad": True,  # use amsgrad for Tanh variant
+    "amsgrad": True,  # Use amsgrad for Tanh variant for stability. (Default: True)
     "loss_type": "mse",  # l1/mse
-    # "loss_type": "l1",  # l1/mse
-    # "renderer_pth_path": None,  # pth to resume from
     "renderer_pth_path": "pretrained/diff_rendering/211120-1956-output-tanh/renderer032000.pth.tar",
     "renderer_type": "tanh",  # sigmoid/tanh/subpixel
-    # "renderer_type": "subpixel",  # sigmoid/tanh/subpixel
-    "bypass_renderer": False,
 }
 
+"""
+Config for MontageGAN
+---------------------
+Set `train_global` to False for Step 1: Pretrain local GANs
+"""
+
 config = {
-    # Control the number of convolution layer of GANs
-    "conv_base_index": 3,  # SG2ada default is 2. The larger the index, the less conv. layer will be used.
+    # Control the number of convolution layer of GANs.
+    "conv_config_index": 3,  # SG2ada default is 2. The larger the index, the less convolution layer will be used.
 
     # Training specific
-    # "train_global": False, # Step 1 (Pretrain local GANs)
-    "train_global": True,  # Step 2 (Train global GAN)
-    "train_renderer": True,  # Enable renderer training?
-    "local_noaug": False,  # `noaug` override for local GANs (Should be `False` during step 1)
-    "global_noaug": False,  # `noaug` override for global GAN
-    "local_fixaug": True,  # Not implemented yet
-    "local_augment_p": 0.3,  # Not implemented yet
-
-    # Loss specific
-    "global_d_real_use_renderer": True,
-    "renderer_retrain_use_real": True,
+    "train_local": True,  # Enable local GAN training?
+    "train_global": True,  # Enable global GAN training?
+    "train_renderer": True,  # Enable renderer training? (Default: True)
+    "train_renderer_use_real": True,  # Train renderer with real layers as well? (Default: True)
+    "bypass_renderer": False,  # Bypass renderer and use alpha composite implementation instead? (Default: False)
+    "global_d_real_use_renderer": True,  # Global discriminator use renderer for real layers? (Default: True)
+    "local_noaug": False,  # `noaug` override for local GANs.  (Default: False)
+    "global_noaug": False,  # `noaug` override for global GAN.  (Default: False)
+    "aug_p_max": 0.6,  # Augmentation pipeline parameter `p` maximum.
+    "global_g_optimize_synthesis": True,  # Optimize synthesis networks during the global generator optimization?
 
     # Report specific
-    "debug": False  # Print debug message
+    "debug": False  # Print debug message.
 }
 
 if not config["train_global"]:
     print("Global GAN training is disabled!!!")
     config["train_renderer"] = False
-    renderer_config["bypass_renderer"] = True
+    config["bypass_renderer"] = True
+
+if not config["train_local"]:
+    print("Local GANs training is disabled!!!")
 
 if not config["train_renderer"]:
     print("Renderer training is disabled!!!")
 
-if not renderer_config["bypass_renderer"]:
-    is_range_tanh = True  # whether the data range is [0,1] or [-1,1]
+if not config["bypass_renderer"]:
     if renderer_config["renderer_type"] == "sigmoid":
-        from diff_rendering.networks import Renderer as Renderer  # Sigmoid variant
-
-        is_range_tanh = False
+        raise RuntimeError(f"Renderer type sigmoid is not supported")
     elif renderer_config["renderer_type"] == "tanh":
         from diff_rendering.networks import RendererTanh as Renderer  # Tanh variant
     elif renderer_config["renderer_type"] == "subpixel":
@@ -104,10 +103,8 @@ if not renderer_config["bypass_renderer"]:
     if renderer_config["renderer_pth_path"]:
         saved = torch.load(renderer_config["renderer_pth_path"])
         if isinstance(saved, dict):
-            # New pickle format
             renderer.load_state_dict(saved["renderer"])
         else:
-            # Old pickle format that contain only the model, deprecated!
             renderer.load_state_dict(saved)
 
     if renderer_config["loss_type"] == "mse":
@@ -200,13 +197,19 @@ def training_loop(
         loss_kwargs,
     ])
 
-    # Apply conv_base_index parameter.
-    local_G_kwargs.conv_base_index = local_D_kwargs.conv_base_index = global_D_kwargs.conv_base_index = \
-        training_set_kwargs.conv_base_index = config["conv_base_index"]
+    # Apply conv_config_index parameter.
+    local_G_kwargs.conv_config_index = local_D_kwargs.conv_config_index = global_D_kwargs.conv_config_index = \
+        training_set_kwargs.conv_config_index = config["conv_config_index"]
 
     # Apply config to loss kwargs.
     loss_kwargs.global_d_real_use_renderer = config["global_d_real_use_renderer"]
-    loss_kwargs.renderer_retrain_use_real = config["renderer_retrain_use_real"]
+    loss_kwargs.renderer_retrain_use_real = config["train_renderer_use_real"]
+
+    # Dump custom config to json.
+    with open(os.path.join(run_dir, 'renderer_options.json'), 'wt') as f:
+        json.dump(renderer_config, f, indent=2)
+    with open(os.path.join(run_dir, 'montage_gan_options.json'), 'wt') as f:
+        json.dump(config, f, indent=2)
 
     # Initialize.
     start_time = time.time()
@@ -234,7 +237,7 @@ def training_loop(
         return m.train().requires_grad_(False).to(device)
 
     layer_names = training_set.layer_names
-    layer_sizes = [training_set.base_size_layer(layer_name) for layer_name in layer_names]
+    layer_sizes = [training_set.target_res_layer(layer_name) for layer_name in layer_names]
     num_channels = training_set.num_channels
     num_layers = training_set.num_layers
     local_G_list, local_D_list = [], []
@@ -314,7 +317,7 @@ def training_loop(
         modules = [("mapping_network", mapping_network)]
         modules += [("local_G_list", local_G_list)]
         modules += [("local_D_list", local_D_list)]
-        if not renderer_config["bypass_renderer"]:
+        if not config["bypass_renderer"]:
             modules += [("renderer", renderer)]
         modules += [("mapping_network_ema", global_G_ema["mapping_network"])]
         modules += [("local_G_ema", global_G_ema["local_G_list"])]
@@ -360,7 +363,7 @@ def training_loop(
     modules = [("mapping_network", mapping_network)]
     modules += [("local_G_list", local_G_list)]
     modules += [("local_D_list", local_D_list)]
-    if not renderer_config["bypass_renderer"]:
+    if not config["bypass_renderer"]:
         modules += [("renderer", renderer)]
     modules += [(None, global_G_ema["mapping_network"])]
     modules += [(None, global_G_ema["local_G_list"])]
@@ -394,7 +397,7 @@ def training_loop(
             ddp_modules[name] = module
 
     phases = []
-    if renderer_config["bypass_renderer"]:
+    if config["bypass_renderer"]:
         loss = dnnlib.util.construct_class_by_name(device=device,
                                                    layer_names=layer_names,
                                                    **ddp_modules,
@@ -409,33 +412,36 @@ def training_loop(
         if config["train_renderer"]:
             phases += [dnnlib.EasyDict(name="Renderer", module=renderer, opt=optimizer_renderer, interval=1)]
 
-    # Local GANs update phases
-    for layer_name, local_G, local_D in zip(layer_names, local_G_list, local_D_list):
-        for name, local_module, local_opt_kwargs, local_reg_interval in [
-            ("local_G", [mapping_network, local_G], local_G_opt_kwargs, G_reg_interval),
-            ("local_D", local_D, local_D_opt_kwargs, D_reg_interval)]:
+    if config["train_local"]:
+        # Local GANs update phases
+        for layer_name, local_G, local_D in zip(layer_names, local_G_list, local_D_list):
+            for name, local_module, local_opt_kwargs, local_reg_interval in [
+                ("local_G", [mapping_network, local_G], local_G_opt_kwargs, G_reg_interval),
+                ("local_D", local_D, local_D_opt_kwargs, D_reg_interval)]:
 
-            if name == "local_G":
-                local_parameters = chain(*[m.parameters() for m in local_module])
-            else:
-                local_parameters = local_module.parameters()
+                if name == "local_G":
+                    local_parameters = chain(*[m.parameters() for m in local_module])
+                else:
+                    local_parameters = local_module.parameters()
 
-            if local_reg_interval is None:
-                opt = dnnlib.util.construct_class_by_name(params=local_parameters,
-                                                          **local_opt_kwargs
-                                                          )  # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name + f'both_{layer_name}', module=local_module, opt=opt, interval=1)]
-            else:  # Lazy regularization.
-                mb_ratio = local_reg_interval / (local_reg_interval + 1)
-                opt_kwargs = dnnlib.EasyDict(local_opt_kwargs)
-                opt_kwargs.lr = opt_kwargs.lr * mb_ratio
-                opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
-                opt = dnnlib.util.construct_class_by_name(local_parameters,
-                                                          **opt_kwargs)  # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name + f'main_{layer_name}', module=local_module, opt=opt, interval=1)]
-                phases += [
-                    dnnlib.EasyDict(name=name + f'reg_{layer_name}', module=local_module, opt=opt,
-                                    interval=local_reg_interval)]
+                if local_reg_interval is None:
+                    opt = dnnlib.util.construct_class_by_name(params=local_parameters,
+                                                              **local_opt_kwargs
+                                                              )  # subclass of torch.optim.Optimizer
+                    phases += [
+                        dnnlib.EasyDict(name=name + f'both_{layer_name}', module=local_module, opt=opt, interval=1)]
+                else:  # Lazy regularization.
+                    mb_ratio = local_reg_interval / (local_reg_interval + 1)
+                    opt_kwargs = dnnlib.EasyDict(local_opt_kwargs)
+                    opt_kwargs.lr = opt_kwargs.lr * mb_ratio
+                    opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
+                    opt = dnnlib.util.construct_class_by_name(local_parameters,
+                                                              **opt_kwargs)  # subclass of torch.optim.Optimizer
+                    phases += [
+                        dnnlib.EasyDict(name=name + f'main_{layer_name}', module=local_module, opt=opt, interval=1)]
+                    phases += [
+                        dnnlib.EasyDict(name=name + f'reg_{layer_name}', module=local_module, opt=opt,
+                                        interval=local_reg_interval)]
 
     if config["train_global"]:
         # Global GAN update after local GANs' phase
@@ -444,7 +450,10 @@ def training_loop(
             ('global_D', global_D, global_D_opt_kwargs, D_reg_interval)]:
 
             if name == "global_G":
-                global_parameters = chain(*[m.parameters() for m in global_module])
+                if config["global_g_optimize_synthesis"]:
+                    global_parameters = chain(*[m.parameters() for m in global_module])
+                else:
+                    global_parameters = chain(*[m.parameters() for m in [mapping_network, pos_estimator]])
             else:
                 global_parameters = global_module.parameters()
 
@@ -469,6 +478,9 @@ def training_loop(
         if rank == 0:
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
+
+    if config["debug"]:
+        print([phase.name for phase in phases])
 
     # Export sample images.
     grid_z = None
@@ -544,8 +556,6 @@ def training_loop(
 
         # Execute training phases.
         for phase, phase_gen_z in zip(phases, all_gen_z):
-            if config["debug"]:
-                print(phase.name)
             if batch_idx % phase.interval != 0:
                 continue
 
@@ -617,7 +627,7 @@ def training_loop(
                                  ada_kimg * 1000)
                 # Ensure that p doesn't go up too far.
                 augment_pipe.p.copy_((augment_pipe.p + adjust).max(misc.constant(0, device=device)).min(
-                    misc.constant(0.6, device=device)))
+                    misc.constant(config["aug_p_max"], device=device)))
                 # augment_pipe.p.copy_((augment_pipe.p + adjust).max(misc.constant(0, device=device)))
 
         # Perform maintenance tasks once per tick.
@@ -722,7 +732,7 @@ def training_loop(
             modules = [("mapping_network", mapping_network)]
             modules += [("local_G_list", local_G_list)]
             modules += [("local_D_list", local_D_list)]
-            if not renderer_config["bypass_renderer"]:
+            if not config["bypass_renderer"]:
                 modules += [("renderer", renderer)]
             modules += [("mapping_network_ema", global_G_ema["mapping_network"])]
             modules += [("local_G_ema", global_G_ema["local_G_list"])]
