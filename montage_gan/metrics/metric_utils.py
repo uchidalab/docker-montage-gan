@@ -264,7 +264,15 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
     # Image generation func.
     def run_generator(z, c):
         ws = mapping_network(z=z, c=torch.empty(size=(len(z), 0)))
-        local_G_output_list = [G_ema(ws=ws[:, :G_ema.num_ws], noise_mode='const') for G_ema in local_G_list]
+        if len(ws.shape) == 3:
+            # Mapping Network [B, num_ws, w_dim]
+            local_G_output_list = [G_ema(ws=ws[:, :G_ema.num_ws], noise_mode='const') for G_ema in local_G_list]
+        elif len(ws.shape) == 4:
+            # Global Mapping Network [B, L, num_ws, w_dim]
+            local_G_output_list = [G_ema(ws=ws_local[:, :G_ema.num_ws], noise_mode='const') for ws_local, G_ema in
+                                   zip(ws, local_G_list)]
+        else:
+            raise RuntimeError("ws.shape len != 3 or 4")
         fake_layer = make_batch_for_pos_estimator(local_G_output_list, pad_value=-1)  # B,L,C,H,W [-1,1]
         transformed_fake_layer, _ = pos_estimator(fake_layer)  # B,L,C,H,W [-1,1]
         transformed_fake_layer = torch.clip(transformed_fake_layer, -1, 1)

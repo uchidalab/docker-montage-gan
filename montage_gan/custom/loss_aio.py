@@ -16,11 +16,12 @@ class Loss:
 
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, layer_name, device, mapping_network, local_G, local_D, augment_pipe=None,
+    def __init__(self, layer_name, layer_index, device, mapping_network, local_G, local_D, augment_pipe=None,
                  style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2):
         """
         :param device:
         :param layer_name: Local GAN's name
+        :param layer_index: Local GAN's index
         :param mapping_network: Mapping Network, latent code z -> w
         :param local_G: Local Generator, w -> image
         :param local_D: Local Discriminator
@@ -33,6 +34,7 @@ class StyleGAN2Loss(Loss):
         """
         super().__init__()
         self.layer_name = layer_name
+        self.layer_index = layer_index
         self.device = device
         self.mapping_network = mapping_network
         self.local_G = local_G
@@ -64,12 +66,20 @@ class StyleGAN2Loss(Loss):
         """
         with misc.ddp_sync(self.mapping_network, sync):
             ws = self.mapping_network(z, c)
+            is_global_mapping_network = len(ws.shape) == 4
+            if is_global_mapping_network:
+                ws = ws[:, self.layer_index, :, :]
             if self.style_mixing_prob > 0:
                 with torch.autograd.profiler.record_function(f'style_mixing_{self.layer_name}'):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff,
                                          torch.full_like(cutoff, ws.shape[1]))
-                    ws[:, cutoff:] = self.mapping_network(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
+                    if is_global_mapping_network:
+                        mix = self.mapping_network(torch.randn_like(z), c, skip_w_avg_update=True)[:, self.layer_index,
+                              cutoff:]
+                    else:
+                        mix = self.mapping_network(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
+                    ws[:, cutoff:] = mix
         with misc.ddp_sync(self.local_G, sync):
             num_ws = self.local_G.num_ws
             ws = ws[:, :num_ws]
@@ -107,6 +117,9 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function(f'Gpl_forward_{self.layer_name}'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
                 gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size] if gen_c else gen_c, sync=sync)
+                is_global_mapping_network = len(gen_ws.shape) == 4
+                if is_global_mapping_network:
+                    gen_ws = gen_ws[:, self.layer_index, :, :]
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function(
                         f'pl_grads_{self.layer_name}'), conv2d_gradfix.no_weight_gradients():
@@ -209,9 +222,10 @@ class MontageGANLoss:
         # Local
         self.layer_names = layer_names
         self.local_GAN_loss_list = [
-            StyleGAN2Loss(layer_name, device, mapping_network, local_G, local_D, augment_pipe, **sg2loss_kwargs)
-            for layer_name, local_G, local_D, augment_pipe in
-            zip(layer_names, local_G_list, local_D_list, augment_pipe_list)]
+            StyleGAN2Loss(layer_name, layer_index, device, mapping_network, local_G, local_D, augment_pipe,
+                          **sg2loss_kwargs)
+            for layer_name, layer_index, local_G, local_D, augment_pipe in
+            zip(layer_names, range(len(layer_names)), local_G_list, local_D_list, augment_pipe_list)]
 
         # Global
         self.pos_estimator = pos_estimator
@@ -255,7 +269,6 @@ class MontageGANLoss:
             assert base_phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
             assert layer_name in self.layer_names
             layer_idx = self.layer_names.index(layer_name)
-            # TODO debug
             real_img = real_list_of_bchw[layer_idx].to(self.device)
             loss = self.local_GAN_loss_list[layer_idx]
             loss.accumulate_gradients(base_phase, real_img, gen_z, sync, gain, real_c, gen_c)
@@ -277,7 +290,6 @@ class MontageGANLoss:
                     training_stats.report(f'global/Loss/signs/fake', gen_logits.sign())
                     loss_Gmain = torch.nn.functional.softplus(-gen_logits)  # -log(sigmoid(gen_logits))
                     training_stats.report(f'global/Loss/G/loss', loss_Gmain)
-                    # TODO debug
                     loss_theta_constrain = theta_constrain_loss(theta, self.device)
                     training_stats.report(f'global/Loss/STN/theta_constrain', loss_theta_constrain)
                 with torch.autograd.profiler.record_function(f'Gmain_backward_global'):

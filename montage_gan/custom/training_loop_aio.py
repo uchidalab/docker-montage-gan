@@ -15,7 +15,7 @@ from torchvision.utils import save_image
 
 import dnnlib
 from custom.dataset_aio import DatasetAIO
-from custom.networks_aio import MappingNetwork, SynthesisNetwork, Discriminator
+from custom.networks_aio import MappingNetwork, GlobalMappingNetwork, SynthesisNetwork, Discriminator
 from custom_utils.image_utils import alpha_composite, make_batch_for_pos_estimator, normalize_zero1, \
     make_batch_for_local_d, normalize_minus11
 from fukuwarai.networks import STNv2c as STN
@@ -67,7 +67,11 @@ config = {
     "local_noaug": False,  # `noaug` override for local GANs.  (Default: False)
     "global_noaug": False,  # `noaug` override for global GAN.  (Default: False)
     "aug_p_max": 0.6,  # Augmentation pipeline parameter `p` maximum.
+
+    # Experimental
     "global_g_optimize_synthesis": True,  # Optimize synthesis networks during the global generator optimization?
+    "use_global_mapping_network": True,  # Use Global Mapping Network (z-> w_1, w_2, ..., w_l)
+    "global_optimize_interval": 4,  # Interval for global modules' optimization (local modules' interval is always 1)
 
     # Report specific
     "debug": False  # Print debug message.
@@ -205,6 +209,11 @@ def training_loop(
     loss_kwargs.global_d_real_use_renderer = config["global_d_real_use_renderer"]
     loss_kwargs.renderer_retrain_use_real = config["train_renderer_use_real"]
 
+    # Override Global Mapping Network.
+    if config["use_global_mapping_network"]:
+        mapping_kwargs.class_name = 'custom.networks_aio.GlobalMappingNetwork'
+        mapping_kwargs.num_splits = renderer_config["img_layers"]
+
     # Dump custom config to json.
     with open(os.path.join(run_dir, 'renderer_options.json'), 'wt') as f:
         json.dump(renderer_config, f, indent=2)
@@ -263,7 +272,7 @@ def training_loop(
         local_D_list.append(local_D)
 
     max_ws_num = max([local_G.num_ws for local_G in local_G_list])
-    mapping_network: MappingNetwork = init_module(
+    mapping_network: Union[MappingNetwork, GlobalMappingNetwork] = init_module(
         dnnlib.util.construct_class_by_name(**mapping_kwargs, c_dim=0, num_ws=max_ws_num))
     global_G_ema["mapping_network"] = copy.deepcopy(mapping_network).eval()
 
@@ -302,10 +311,30 @@ def training_loop(
     def load_state_dicts(modules: Union[torch.nn.Module, List[torch.nn.Module]],
                          state_dicts: Union[Dict, List[Dict]]):
         is_list = isinstance(modules, list)
-
+        is_global_mapping_network = isinstance(modules, GlobalMappingNetwork)
         if is_list:
             assert len(modules) == len(state_dicts)
             _ = [module.load_state_dict(state_dict) for module, state_dict in zip(modules, state_dicts)]
+        elif is_global_mapping_network:
+            current_model_dict = modules.state_dict()
+            # Repeat the param for all layers
+            # https://github.com/pytorch/pytorch/issues/40859
+            new_state_dict = {}
+            for k, v in zip(current_model_dict.keys(), state_dicts.values()):
+                if v.size() == current_model_dict[k].size():
+                    new_state_dict[k] = v
+                else:
+                    # print(f"Key: {k}, current size {current_model_dict[k].size()}, state_dicts size {v.size()}")
+                    repeat = [1] * len(current_model_dict[k].size())
+                    repeat[0] = num_layers
+                    new_state_dict[k] = v.repeat(*repeat)
+            modules.load_state_dict(new_state_dict)
+            # Lazy-load method
+            # new_state_dict = {k: v if v.size() == current_model_dict[k].size() else current_model_dict[k] for k, v in
+            #                   zip(current_model_dict.keys(), state_dicts.values())}
+            # Disable strict mode to load `MappingNetwork` to `GlobalMappingNetwork`
+            # https://pytorch.org/tutorials/beginner/saving_loading_models.html#warmstarting-model-using-parameters-from-a-different-model
+            # modules.load_state_dict(new_state_dict, strict=False)
         else:
             modules.load_state_dict(state_dicts)
 
@@ -445,9 +474,11 @@ def training_loop(
 
     if config["train_global"]:
         # Global GAN update after local GANs' phase
+        global_optimize_interval = config["global_optimize_interval"]
         for name, global_module, global_opt_kwargs, global_reg_interval in [
-            ('global_G', [mapping_network, *local_G_list, pos_estimator], global_G_opt_kwargs, G_reg_interval),
-            ('global_D', global_D, global_D_opt_kwargs, D_reg_interval)]:
+            ('global_G', [mapping_network, *local_G_list, pos_estimator], global_G_opt_kwargs,
+             G_reg_interval * global_optimize_interval),
+            ('global_D', global_D, global_D_opt_kwargs, D_reg_interval * global_optimize_interval)]:
 
             if name == "global_G":
                 if config["global_g_optimize_synthesis"]:
@@ -460,7 +491,8 @@ def training_loop(
             if global_reg_interval is None:
                 opt = dnnlib.util.construct_class_by_name(params=global_parameters,
                                                           **global_opt_kwargs)  # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name + 'both', module=global_module, opt=opt, interval=1)]
+                phases += [dnnlib.EasyDict(name=name + 'both', module=global_module, opt=opt,
+                                           interval=global_optimize_interval)]
             else:  # Lazy regularization.
                 mb_ratio = global_reg_interval / (global_reg_interval + 1)
                 opt_kwargs = dnnlib.EasyDict(global_opt_kwargs)
@@ -468,7 +500,8 @@ def training_loop(
                 opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
                 opt = dnnlib.util.construct_class_by_name(global_parameters,
                                                           **opt_kwargs)  # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name + 'main', module=global_module, opt=opt, interval=1)]
+                phases += [dnnlib.EasyDict(name=name + 'main', module=global_module, opt=opt,
+                                           interval=global_optimize_interval)]
                 phases += [
                     dnnlib.EasyDict(name=name + 'reg', module=global_module, opt=opt, interval=global_reg_interval)]
 
@@ -673,9 +706,15 @@ def training_loop(
                 pos_estimator_ema = global_G_ema["pos_estimator"]
 
             ws = mapping_network_ema(z=z, c=torch.empty(size=(len(z), 0)))
-
-            local_G_output_list = [G_ema(ws=ws[:, :G_ema.num_ws], noise_mode='const') for G_ema in local_G_list_ema]
-
+            if len(ws.shape) == 3:
+                # Mapping Network [B, num_ws, w_dim]
+                local_G_output_list = [G_ema(ws=ws[:, :G_ema.num_ws], noise_mode='const') for G_ema in local_G_list_ema]
+            elif len(ws.shape) == 4:
+                # Global Mapping Network [B, L, num_ws, w_dim]
+                local_G_output_list = [G_ema(ws=ws[:, layer_index, :G_ema.num_ws], noise_mode='const') for
+                                       layer_index, G_ema in enumerate(local_G_list_ema)]
+            else:
+                raise RuntimeError("ws.shape len != 3 or 4")
             fake_layer = make_batch_for_pos_estimator(local_G_output_list, pad_value=-1)  # B,L,C,H,W [-1,1]
             if not config["train_global"]:
                 return fake_layer

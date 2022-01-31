@@ -322,7 +322,6 @@ class AugmentPipe(torch.nn.Module):
             mx0, my0, mx1, my1 = margin.ceil().to(torch.int32)
 
             # Pad image and adjust origin.
-            # TODO TypeError: reflection_pad2d(): argument 'padding' must be tuple of ints, but found element of type Tensor at pos 1
             images = torch.nn.functional.pad(input=images, pad=[mx0, mx1, my0, my1], mode='reflect')
             G_inv = translate2d((mx0 - mx1) / 2, (my0 - my1) / 2) @ G_inv
 
