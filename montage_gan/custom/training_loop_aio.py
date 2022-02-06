@@ -74,7 +74,10 @@ config = {
     "global_optimize_interval": 4,  # Interval for global modules' optimization (local modules' interval is always 1)
 
     # Report specific
-    "debug": False  # Print debug message.
+    "debug": False,  # Print debug message.
+    "save_all_layers": False,  # Save ALL layers as individual images. (Might output tons of images. Use with caution!)
+    "run_latent_interpolation": False,  # Do latent interpolation.
+    "run_once": False,  # Quit after the loop is executed once. (Useful for calculating metrics of snapshot, etc.)
 }
 
 if not config["train_global"]:
@@ -530,6 +533,22 @@ def training_loop(
         # Generate grid_z for the first time.
         grid_z = torch.randn([grid_size, mapping_network.z_dim], device=device).split(batch_gpu)
 
+    # Interpolation grid.
+    grid_z_lerp = None
+    lerp_len = 8
+    lerp_num = 9
+    if config["run_latent_interpolation"]:
+        if rank == 0:
+            lerp_z1 = torch.randn([lerp_num, mapping_network.z_dim])
+            lerp_z2 = torch.randn([lerp_num, mapping_network.z_dim])
+            lerp_zs_list = []
+            for i in range(lerp_len):
+                weight = i / (lerp_len - 1)
+                lerp_zs_list.append(torch.lerp(lerp_z1, lerp_z2, weight))
+            lerp_zs = torch.stack(lerp_zs_list)
+            lerp_zs = lerp_zs.transpose(0, 1)
+            grid_z_lerp = lerp_zs.reshape(lerp_len * lerp_num, mapping_network.z_dim).to(device).split(batch_gpu)
+
     # Initialize logs.
     stats_collector = training_stats.Collector(regex='.*')
     stats_metrics = dict()
@@ -721,6 +740,13 @@ def training_loop(
             transformed_fake_layer, _ = pos_estimator_ema(fake_layer)  # B,L,C,H,W [-1,1]
             return transformed_fake_layer
 
+        def save_all_layers(blchw, dir_name):
+            os.makedirs(dir_name, exist_ok=True)
+            for i, lchw in enumerate(blchw):
+                for j, chw in enumerate(lchw):
+                    file_name = "{:2d}_{:2d}.png".format(i, j)
+                    save_image(torch.unsqueeze(chw, 0), os.path.join(dir_name, file_name), padding=0)
+
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
             batch = torch.cat([generate_sample_ema(z=z).cpu() for z in grid_z])  # B,L,C,H,W
@@ -732,9 +758,23 @@ def training_loop(
             save_image(torch.reshape(batch, (b * l, c, h, w))[:4 * renderer_config["img_layers"]],
                        os.path.join(run_dir, f'fakes-layer{cur_nimg // 1000:06d}.png'),
                        nrow=renderer_config["img_layers"])
+            # [Optional] Save all layers
+            if config["save_all_layers"]:
+                save_all_layers(batch, f'fakes-layer-all{cur_nimg // 1000:06d}')
             # Save blended
             images = alpha_composite(batch)  # B,C,H,W [0,1]
             save_image(images, os.path.join(run_dir, f'fakes{cur_nimg // 1000:06d}.png'))
+
+        # [Optional] Latent interpolation
+        if config["run_latent_interpolation"]:
+            if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
+                batch = torch.cat([generate_sample_ema(z=z).cpu() for z in grid_z_lerp])  # B,L,C,H,W
+                batch = torch.clip(batch, -1, 1)  # B,L,C,H,W [-1,1]
+                batch = normalize_zero1(batch)  # B,L,C,H,W [0,1]
+                # Save blended
+                images = alpha_composite(batch)  # B,C,H,W [0,1]
+                save_image(images, os.path.join(run_dir, f'interpolate{cur_nimg // 1000:06d}.png'),
+                           nrow=lerp_len)
 
         # Save network snapshot.
         def get_module_for_snapshot(modules: Union[torch.nn.Module, List[torch.nn.Module]]):
@@ -846,7 +886,7 @@ def training_loop(
         tick_start_nimg = cur_nimg
         tick_start_time = time.time()
         maintenance_time = tick_start_time - tick_end_time
-        if done:
+        if done or config["run_once"]:
             break
 
     # Done.
