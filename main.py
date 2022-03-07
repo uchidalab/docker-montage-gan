@@ -37,9 +37,16 @@ subprocess.run(
     f" --mirror {mirror} --metrics {metrics} --kimg {kimg} --resume {resume}"
     f" --target {target} --augpipe {augpipe} --net-snap {net_snap} --cfg {cfg}".split(" "), env=env)
 
+# For interpolation
+resume = "output/00009-global-mirror-aio-kimg5000-target0.6-bgcfnc-resumecustom/network-snapshot-000100.pth"
+# subprocess.run(
+#     f"python montage_gan/train_aio.py --outdir {outdir} --data {data}"
+#     f" --mirror {mirror} --metrics {metrics} --kimg {kimg} --resume {resume}"
+#     f" --target {target} --augpipe {augpipe} --net-snap {net_snap} --cfg {cfg}".split(" "), env=env)
+
 # For metrics evaluation
 metrics = "fid50k_full,is50k"
-resume = "output/00009-global-mirror-aio-kimg5000-target0.6-bgcfnc-resumecustom/network-snapshot-000120.pth"
+resume = "output/00009-global-mirror-aio-kimg5000-target0.6-bgcfnc-resumecustom/network-snapshot-000100.pth"
 # subprocess.run(
 #     f"python montage_gan/train_aio.py --outdir {outdir} --data {data}"
 #     f" --mirror {mirror} --metrics {metrics} --kimg {kimg} --resume {resume}"

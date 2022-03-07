@@ -71,7 +71,7 @@ config = {
     # Experimental
     "global_g_optimize_synthesis": True,  # Optimize synthesis networks during the global generator optimization?
     "use_global_mapping_network": True,  # Use Global Mapping Network (z-> w_1, w_2, ..., w_l)
-    "global_optimize_interval": 4,  # Interval for global modules' optimization (local modules' interval is always 1)
+    "global_optimize_interval": 1,  # Interval for global modules' optimization (local modules' interval is always 1)
 
     # Report specific
     "debug": False,  # Print debug message.
@@ -745,7 +745,7 @@ def training_loop(
             for i, lchw in enumerate(blchw):
                 for j, chw in enumerate(lchw):
                     file_name = "{:2d}_{:2d}.png".format(i, j)
-                    save_image(torch.unsqueeze(chw, 0), os.path.join(dir_name, file_name), padding=0)
+                    save_image(torch.unsqueeze(chw, 0), os.path.join(run_dir, dir_name, file_name), padding=0)
 
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
