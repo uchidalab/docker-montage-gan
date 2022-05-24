@@ -3,7 +3,6 @@ import datetime
 from torch.autograd import grad
 from torch.optim import Adam
 from torch.utils.data import DataLoader
-# from torchvision.utils import save_image
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -11,9 +10,7 @@ from custom.dataset_global import DatasetGlobal as GlobalDataset
 from custom_utils.image_utils import *
 from custom_utils.utils import strfdelta, timestamp
 from diff_rendering.networks import Renderer
-# from fukuwarai.networks import STN
 from fukuwarai.networks import STNv2b as STN
-# from fukuwarai.networks import SimpleGlobalDiscriminator as Discriminator
 from training.networks import Discriminator  # SG2ada Discriminator
 
 config = {
@@ -87,8 +84,8 @@ break_flag = False
 while not break_flag:
     for i, data in enumerate(tqdm(dataloader, total=len(dataloader))):
         data1, data2, data3 = torch.split(data, config["batch_size"])
-        stn.zero_grad()  # Maybe not need?
-        renderer.zero_grad()  # Maybe not need?
+        stn.zero_grad()
+        renderer.zero_grad()
 
         # Training Discriminator
         x = alpha_composite(data1).to(config["device"])
@@ -113,7 +110,7 @@ while not break_flag:
         D_loss.backward()
         optimizer_d.step()
 
-        renderer.zero_grad()  # Maybe not need?
+        renderer.zero_grad()
         # Training Generator
         pseudo_fake = generate_pseudo_fake(data3).to(config["device"])
         x_fake, theta = stn(pseudo_fake)
@@ -173,8 +170,6 @@ while not break_flag:
             rendered = renderer(x_fake)
             grid = make_grid(rendered, padding=0)
             writer.add_image("G/rendered", grid, step)
-            # save_image(grid, "{}/step{:06d}.png".format(output_dir, step))
-            # print(theta)
             stn.train()
 
         if is_last:

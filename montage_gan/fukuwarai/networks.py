@@ -435,7 +435,7 @@ def test_discriminator():
 
 if __name__ == "__main__":
     # Test the network with dummy data
-    # test_stn()
+    test_stn()
     test_discriminator()
     # from torchinfo import summary
     #
